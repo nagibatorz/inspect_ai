@@ -470,6 +470,7 @@ class _FakeTensor:
 class _FakeTokenizer:
     chat_template = None
     eos_token = "<eos>"
+    pad_token_id = 1
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -1171,3 +1172,25 @@ def test_hf_generation_config_default_rejects_config_subclass() -> None:
 
     with pytest.raises(ValueError, match="CustomGenerationConfig"):
         resolve_generation_config("default", repo_config, token=None)
+
+
+async def test_hf_generate_passes_tokenizer_pad_token_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """generate() must forward the tokenizer's pad token id (see #6623).
+
+    Without it, generate() falls back to the model's generation config,
+    whose pad_token_id is 0 for meta-llama/Llama-2-7b-chat-hf — an
+    untrained embedding that overflows activations to inf in batched
+    generation once a sequence finishes early.
+    """
+    with _hf_provider_with_fake_deps(monkeypatch) as provider:
+        model = _FakeModel(101)
+        api = _fake_hf_api(provider, "a", model)
+        # a value distinct from any default, so the assertion pins that
+        # generate() forwards the tokenizer's own pad token id
+        api.tokenizer.pad_token_id = 12345
+        await _generate_drained_together(provider, [(api, GenerateConfig(), "1")])
+
+    assert len(model.calls) == 1
+    assert model.calls[0][1]["pad_token_id"] == 12345
