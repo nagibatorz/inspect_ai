@@ -320,6 +320,7 @@ class HuggingFaceAPI(ModelAPI):
             kwargs["stopping_criteria"] = stopping_criteria
 
         kwargs["return_dict_in_generate"] = True
+        kwargs["pad_token_id"] = self.tokenizer.pad_token_id
         generator = functools.partial(self.model.generate, **kwargs)
 
         # prepare decoder
