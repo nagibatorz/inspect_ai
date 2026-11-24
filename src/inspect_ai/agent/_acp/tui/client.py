@@ -43,6 +43,7 @@ from inspect_ai.agent._acp.discovery import TargetAddress
 from inspect_ai.agent._acp.inspect_ext import (
     INSPECT_EVENT_METHOD,
     INSPECT_LIST_SAMPLES_METHOD,
+    INSPECT_TURN_STATE_METHOD,
     INTERACTIVE_META_KEY,
     PICKER_META_KEY,
     PLAN_RENDERING_META_KEY,
@@ -292,11 +293,20 @@ async def _list_for_target(eval_id: str, target: TargetAddress) -> list[SessionR
         )
         response: Any = await conn.send_request(INSPECT_LIST_SAMPLES_METHOD, {})
     finally:
-        writer.close()
+        # Close the connection before the writer: closing the socket
+        # alone leaves the connection's sender task pending, and the
+        # garbage collector later destroys it mid-loop ("Send loop
+        # failed"). Connection.close() stops the sender cleanly.
         try:
-            await writer.wait_closed()
+            await conn.close()
         except Exception:
             pass
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
 
     samples = response.get("samples", []) if isinstance(response, dict) else []
     rows: list[SessionRow] = []
@@ -913,6 +923,22 @@ def _build_session_router(
         Route(
             method="inspect/session_ended",
             func=_on_session_ended,
+            kind="notification",
+        )
+    )
+
+    async def _on_turn_state(params: Any) -> None:
+        # The server sends a turn_state snapshot on attach and at
+        # each turn boundary. The TUI derives turn activity from
+        # ``session/update`` instead, so there is nothing to do with
+        # it here — but the route must exist, or the router raises
+        # "Method not found" and logs an error for every snapshot.
+        return None
+
+    router.add_route(
+        Route(
+            method=INSPECT_TURN_STATE_METHOD,
+            func=_on_turn_state,
             kind="notification",
         )
     )
