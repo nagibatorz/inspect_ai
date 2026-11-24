@@ -14,12 +14,17 @@ down — meaningfully more expensive than the in-memory tests in
 
 from __future__ import annotations
 
+import asyncio
+import gc
+import json
+import logging
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import anyio
 import pytest
 from test_helpers.utils import skip_if_trio
 
@@ -28,6 +33,7 @@ from inspect_ai.agent._acp.discovery import TargetAddress
 from inspect_ai.agent._acp.server import acp_server
 from inspect_ai.agent._acp.tui.client import (
     CLIENT_CAPABILITIES,
+    _list_for_target,
     attach_session,
     enumerate_sessions,
 )
@@ -228,6 +234,42 @@ async def test_enumerate_applies_eval_id_filter(
             [("evt-tui-f", target)], eval_id_filter="something-else"
         )
         assert rows == []
+
+
+@skip_if_trio
+@unix_only
+async def test_list_for_target_closes_listing_connection(caplog) -> None:
+    """Enumerating must not leak the listing connection's sender task.
+
+    The listing connection used to close only its socket: the sender
+    task stayed pending until the GC destroyed it mid-loop, logging
+    "Task was destroyed but it is pending!" and "Send loop failed"
+    (#6733). A server that answers every request with an empty result
+    is enough to drive the listing round-trip.
+    """
+
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        while line := await reader.readline():
+            reply = {"jsonrpc": "2.0", "id": json.loads(line)["id"], "result": {}}
+            writer.write((json.dumps(reply) + "\n").encode())
+            await writer.drain()
+        writer.close()
+
+    path = Path(tempfile.mkdtemp(prefix="acp_tui_list_", dir="/tmp")) / "acp.sock"
+    async with await asyncio.start_unix_server(serve, path=path):
+        with caplog.at_level(logging.ERROR):
+            rows = await _list_for_target("eval", TargetAddress(socket_path=path))
+            assert rows == []
+            # let the receive loop observe the socket close and exit,
+            # so the connection is collectable below.
+            await anyio.sleep(0.1)
+            gc.collect()
+    assert not [
+        record
+        for record in caplog.records
+        if "Send loop failed" in record.message
+        or "Task was destroyed" in record.message
+    ]
 
 
 @skip_if_trio
